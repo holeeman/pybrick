@@ -48,6 +48,7 @@ class Client(object):
         self.status = NET_CLIENT_CONNECTED
 
     def disconnect(self):
+        # disconnect client from server
         self.socket.close()
         self.status = NET_CLIENT_DISCONNECTED
 
@@ -85,9 +86,11 @@ class NetworkingSocket(threading.Thread):
         self.status = NET_SOCKET_CLOSED
 
     def get_status(self):
+        # get status of current socket
         return self.status
 
     def sender(self):
+        # message sender thread
         while self.status != NET_SOCKET_CLOSED:
             self.sending_queue_lock.acquire()
             if not self.sending_queue.empty():
@@ -100,6 +103,7 @@ class NetworkingSocket(threading.Thread):
             self.sending_queue_lock.release()
 
     def receiver(self, soc):
+        # message receiver thread
         while self.status != NET_SOCKET_CLOSED and soc:
             try:
                 data = soc.recv(struct.calcsize("h"))
@@ -115,6 +119,7 @@ class NetworkingSocket(threading.Thread):
             while len(received_data) < packet_size:
                 data = soc.recv(packet_size - len(received_data))
                 if not data:
+                    self.disconnect(soc)
                     received_data = None
                     break
                 received_data += data
@@ -132,12 +137,14 @@ class NetworkingSocket(threading.Thread):
         return self.socket
 
     def get_message(self):
+        # get message from message queue
         self.receiving_queue_lock.acquire()
         _data = self.receiving_queue.get()
         self.receiving_queue_lock.release()
         return _data
 
     def message_empty(self):
+        # returns True if message queue is empty
         self.receiving_queue_lock.acquire()
         _empty = self.receiving_queue.empty()
         self.receiving_queue_lock.release()
@@ -158,6 +165,7 @@ class NetworkingSocket(threading.Thread):
             self.socket_id_list.sort()
 
     def send(self, soc, message):
+        # send message to given socket
         message.dest_socket = soc
         self.sending_queue_lock.acquire()
         self.sending_queue.put(message)
@@ -204,6 +212,7 @@ class ServerSocket(NetworkingSocket):
         self.socket.listen(5)
 
     def close(self):
+        # send all client message
         for client in self.get_client_list():
             new_message = Message()
             new_message.write("flag", NET_CONNECTION_CLOSED)
@@ -238,6 +247,7 @@ class ServerSocket(NetworkingSocket):
                 break
 
     def get_client(self, client_id):
+        # get client object with given id
         self.list_lock.acquire()
         try:
             _client = self.client_list[client_id]
@@ -246,7 +256,14 @@ class ServerSocket(NetworkingSocket):
         self.list_lock.release()
         return _client
 
+    def get_client_socket(self, client_id):
+        # get client socket with given id
+        _client = self.get_client(client_id)
+        if _client:
+            return _client.socket
+
     def get_client_list(self):
+        # get client list of current server
         self.list_lock.acquire()
         _list =  self.client_list.values()
         self.list_lock.release()
@@ -309,25 +326,9 @@ def destroy(networking_socket):
     networking_socket.close()
 
 
-def get_client(server_socket):
-    server_socket.get_client(server_socket)
-
-
 def get_message(networking_socket):
     return networking_socket.get_message()
 
 
 def message_available(networking_socket):
     return not networking_socket.message_empty()
-
-
-def create_message():
-    return Message()
-
-
-def write_message(message, key, value):
-    message.write(key, value)
-
-
-def read_message(message, key):
-    return message.read(key)
