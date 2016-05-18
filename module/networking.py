@@ -1,3 +1,5 @@
+# coding=UTF-8
+
 '''
 Networking Module
 by Hosung Lee (runway3207@hanmail.net)
@@ -11,11 +13,13 @@ import json
 import struct
 
 NET_SOCKET_CREATED = 100
-NET_SOCKET_CLOSED = -100
+NET_SOCKET_CLOSED = 500
 NET_CLIENT_CONNECTED = 110
-NET_CLIENT_DISCONNECTED = -110
-NET_CONNECTION_ESTABLISHED = 111
-NET_CONNECTION_CLOSED = -111
+NET_CLIENT_DISCONNECTED = 510
+NET_CONNECTION_ACCEPTED = 111
+NET_CONNECTION_ESTABLISHED = 112
+NET_CONNECTION_CLOSED = 511
+NET_HEADER = 137
 
 
 class Message(object):
@@ -35,8 +39,8 @@ class Message(object):
         self.data.update({key: value})
 
     def get_packet(self):
-        data = json.dumps(self.data)
-        return struct.pack("h", len(data)) + data
+        data = struct.pack("B", NET_HEADER) + json.dumps(self.data)
+        return struct.pack("H", len(data)) + data
 
     def __repr__(self):
         return str(self.data)
@@ -105,33 +109,53 @@ class NetworkingSocket(threading.Thread):
     def receiver(self, soc):
         # message receiver thread
         while self.status != NET_SOCKET_CLOSED and soc:
+            data = ""
             try:
-                data = soc.recv(struct.calcsize("h"))
+                while len(data) < struct.calcsize("H"):
+                    data += soc.recv(struct.calcsize("B"))
             except socket.error:
                 self.disconnect(soc)
                 break
-            if not data:
-                continue
 
-            packet_size = struct.unpack("h", data)[0]
+            packet_size = struct.unpack("H", data)[0]
             received_data = ""
 
             while len(received_data) < packet_size:
-                data = soc.recv(packet_size - len(received_data))
+                # on first loop, check for header
+                if received_data == "":
+                    data = soc.recv(struct.calcsize('B'))
+                    if not data:
+                        self.disconnect(soc)
+                        received_data = None
+                        break
+
+                    if struct.unpack("B", data)[0] != NET_HEADER:
+                        received_data = None
+                        break
+                else:
+                    data = soc.recv(packet_size - len(received_data))
+
+                # if no data is received, disconnect client from server
                 if not data:
                     self.disconnect(soc)
                     received_data = None
                     break
+
                 received_data += data
 
-            if received_data:
-                message = Message(received_data)
-                if message.read("flag") == NET_CONNECTION_CLOSED:
-                    self.disconnect(soc)
-                    continue
-                self.receiving_queue_lock.acquire()
-                self.receiving_queue.put(message)
-                self.receiving_queue_lock.release()
+            if not received_data:
+                continue
+
+            # remove header
+            received_data = received_data[1:len(received_data)]
+
+            message = Message(received_data)
+            if message.read("flag") == NET_CONNECTION_CLOSED:
+                self.disconnect(soc)
+                continue
+            self.receiving_queue_lock.acquire()
+            self.receiving_queue.put(message)
+            self.receiving_queue_lock.release()
 
     def get_socket(self):
         return self.socket
@@ -196,7 +220,7 @@ class ServerSocket(NetworkingSocket):
 
             # send new_id to new client
             new_message = Message()
-            new_message.write("flag", NET_CONNECTION_ESTABLISHED)
+            new_message.write("flag", NET_CONNECTION_ACCEPTED)
             new_message.write("socket_id", new_id)
             self.send(new_socket, new_message)
 
@@ -281,7 +305,7 @@ class ClientSocket(NetworkingSocket):
             pass
 
         message = self.get_message()
-        if message.read("flag") == NET_CONNECTION_ESTABLISHED:
+        if message.read("flag") == NET_CONNECTION_ACCEPTED:
             # get socket_id
             self.socket_id = message.read("socket_id")
 
@@ -290,17 +314,31 @@ class ClientSocket(NetworkingSocket):
             new_message.write("flag", NET_CONNECTION_ESTABLISHED)
             self.send(self.socket, new_message)
 
+            # send message to myself
+            new_message = Message()
+            new_message.write("flag", NET_CONNECTION_ESTABLISHED)
+            self.receiving_queue_lock.acquire()
+            self.receiving_queue.put(new_message)
+            self.receiving_queue_lock.release()
+
         return self.socket_id
 
     def connect(self):
         # connect to server
         self.socket.connect((self.host, self.port))
 
+    def disconnect(self, soc):
+        # message to myself for notification
+        new_message = Message()
+        new_message.write("sender", 0)
+        new_message.write("flag", NET_CONNECTION_CLOSED)
+
+        self.receiving_queue_lock.acquire()
+        self.receiving_queue.put(new_message)
+        self.receiving_queue_lock.release()
+
     def close(self):
         # disconnect from server
-        new_message = Message()
-        new_message.write("flag", NET_CONNECTION_CLOSED)
-        self.send(self.socket, new_message)
 
         while not self.sending_queue.empty():
             pass
